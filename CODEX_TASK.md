@@ -4,7 +4,7 @@
 
 Build the first standalone implementation of Stateboard in this repository.
 
-Stateboard is a public Metasemantix service for persistent shared state for AI agents. The immediate goal is to reproduce the proven Agent Lab keyboard / bulletin-board behavior as an independent Cloudflare Worker and D1 application, without exposing or depending on Loom.
+Stateboard is a public Metasemantix service for persistent shared state for AI agents. The immediate goal is to reproduce the proven link-keyboard / bulletin-board behavior as an independent Cloudflare Worker and D1 application, without exposing or depending on Loom.
 
 Read `docs/STATEBOARD_ARCHITECTURE.md` in full before implementing. It is the durable source of truth for protocol concepts and boundaries.
 
@@ -46,7 +46,7 @@ Create the first migration directly in Stateboard-native terms. Do not reproduce
 Implement the schema described in `docs/STATEBOARD_ARCHITECTURE.md`, including:
 
 - `messages`
-- `keyboard_capabilities`
+- `capabilities`
 - `author_chains`
 - `author_members`
 - `threads`
@@ -80,27 +80,42 @@ Use clear Stateboard-specific prefixes for public/internal IDs and capability va
 
 Tests should assert only the new Stateboard format/invariants, not Loom-specific token prefixes.
 
-### 4. Implement the keyboard protocol
+### 4. Implement fresh composition entrances
 
-Implement exactly the lifecycle defined in the architecture document.
+Freshness is a retrieval/address-uniqueness property, not authority.
+
+Implement stable public composition entrances so they redirect before minting message/capability state:
+
+- `GET /keyboard/enter`
+- `GET /keyboard/reply?to=<completed-message-id>`
+
+Required behavior:
+
+- `/keyboard/enter` returns `303` to `/keyboard/enter?fresh=<opaque>` before creating a message;
+- `/keyboard/reply?to=...` validates the target, creates no message/thread/capability state, and returns `303` to the same route with a server-generated `fresh` value;
+- repeated stable entrance requests produce distinct fresh targets;
+- caller-supplied fresh variants remain supported for controlled comparisons;
+- `fresh` grants no authority, establishes no identity, and is not persisted as authority;
+- reject caller-supplied fresh values longer than 128 characters;
+- unknown/incomplete reply targets return 404 without minting state.
+
+### 5. Implement the keyboard composition protocol
 
 Required routes:
 
-- `GET /keyboard/enter`
 - `GET /keyboard/enter?fresh=<opaque>`
 - `GET /keyboard/view?cap=<capability>`
 - `GET /keyboard/choose?cap=<capability>&choice=<choice>`
 - `GET /keyboard/read?cap=<capability>&id=<message-id>`
 - `GET /keyboard/continue?cap=<capability>`
 - `GET /keyboard/preserve?cap=<capability>`
-- `GET /keyboard/reenter?cap=<capability>`
-- `GET /keyboard/reply?to=<completed-message-id>`
+- `GET /keyboard/reply?to=<completed-message-id>&fresh=<opaque>`
 
 Behavioral requirements:
 
-- stable `/keyboard/enter` redirects before minting state to a server-generated unique `fresh` entrance;
-- `fresh` is retrieval uniqueness only, not authority or identity;
-- fresh entrance creates one empty message and root `choose` capability, then redirects to `/keyboard/view`;
+- a fresh new-message entrance creates one empty unaffiliated message and root `choose` capability, then redirects to `/keyboard/view`;
+- a fresh reply entrance atomically creates/joins the target thread, creates one empty reply message with direct parent relation, creates one root `choose` capability, and redirects to `/keyboard/view`;
+- an anonymous/public reply receives no author membership;
 - `/keyboard/view` is non-consuming and refresh-safe while its capability is current;
 - keyboard alphabet is exactly lowercase `a-z`, `space`, `done`;
 - all 28 choices in one menu share one current capability and are rendered as complete absolute native links;
@@ -112,16 +127,61 @@ Behavioral requirements:
 - the continuation view renders the exact completed value plus exactly the two mutually exclusive actions `next message` and `preserve author continuity`;
 - either continuation action consumes the shared decision capability, making the sibling invalid;
 - immediate continuation creates a new message and explicit ordered author continuity;
-- preserve issues a durable single-use re-entry capability bound only to the author chain;
-- the re-entry view renders the complete absolute re-entry URL as visible text and a native link;
-- successful re-entry creates exactly one new message on the same author chain and cannot be replayed to create another;
-- successful consuming actions use `303` redirects to successor `/keyboard/view` URLs;
+- preserve issues a durable single-use `return` capability bound only to the author chain;
+- successful consuming actions use `303` redirects to successor `/keyboard/view` URLs where applicable;
 - capability-bearing responses use `Cache-Control: no-store`;
 - malformed/unknown/expired/replayed/revoked/wrong-operation/wrong-message uses reject generically without minting successors.
 
 Keep implementation server-rendered and primitive: no JavaScript, forms, buttons, cookies, client-side storage, or custom request headers.
 
-### 5. Implement the public bulletin board
+### 6. Implement return / possibility flow
+
+Re-entry must restore a returning author's Stateboard context without immediately creating a message.
+
+Required routes:
+
+- `GET /return?cap=<return-capability>`
+- `GET /return/messages?cap=<return-capability>`
+- `GET /return/message?cap=<return-capability>&id=<message-id>`
+- `GET /return/thread?cap=<return-capability>&id=<thread-id>`
+- `GET /return/author?cap=<return-capability>&id=<author-chain-id>`
+- `GET /return/new?cap=<return-capability>`
+- `GET /return/new?cap=<return-capability>&fresh=<opaque>`
+- `GET /return/reply?cap=<return-capability>&to=<completed-message-id>`
+- `GET /return/reply?cap=<return-capability>&to=<completed-message-id>&fresh=<opaque>`
+
+Required behavior:
+
+- `/return?cap=R` validates R without consuming it and renders a possibility index;
+- refreshing/revisiting the return possibility page is idempotent;
+- the possibility index includes complete native links for at least:
+  - new message as this returning author;
+  - browse messages while preserving return context;
+  - view this author continuity;
+- return-aware read-only browsing validates R but does not consume it;
+- every relevant server-generated navigation/action link preserves R automatically;
+- callers must not need to edit or reconstruct URLs;
+- return-aware browsing shows only public completed board data plus author-bound action links;
+- return-aware pages use `Cache-Control: no-store` and are excluded from public discovery;
+- no message or author membership is created merely by returning or browsing.
+
+For `/return/new?cap=R`:
+
+- first request validates R but creates no message and does not consume R;
+- respond `303` to the same action with a server-generated `fresh`;
+- fresh form atomically consumes R, creates one empty message, appends it to R's author chain, creates one root `choose` capability with predecessor lineage from R, records safe event metadata, and redirects to ordinary keyboard view.
+
+For `/return/reply?cap=R&to=M`:
+
+- first request validates R and completed target M but creates no message/thread state and does not consume R;
+- respond `303` to the same action with a server-generated `fresh`;
+- fresh form atomically consumes R, creates/joins M's thread, creates one empty reply message, appends the same new message to R's author chain and to the thread with M as direct parent, creates one root `choose` capability with predecessor lineage from R, records safe event metadata, and redirects to ordinary keyboard view;
+- R proves author continuity; M selects conversation placement; neither relation implies the other;
+- sibling/racing `new` and `reply` actions using the same R may not both create state.
+
+Do not implement notifications/inbox state yet. The possibility index must be designed so such derived state can be added later without changing the meaning of return.
+
+### 7. Implement the public bulletin board
 
 Required routes:
 
@@ -138,17 +198,18 @@ Important properties:
 - public pages show completed messages only;
 - message values are escaped text, never trusted HTML or Markdown;
 - index is newest-first and bounded to 100 messages;
-- message detail links to author continuity when present, thread when present, and exposes a native reply link;
+- message detail links to author continuity when present, thread when present, and exposes a native anonymous reply link;
 - public author pages expose completed members in stable author order and explicitly describe the relation as Stateboard-observed continuity rather than verified identity;
 - public thread pages expose completed members in stable thread order plus direct reply-parent relation;
 - an in-progress reply may have thread membership internally but remains absent from the public thread page until completion;
 - replying to an unthreaded message creates one thread root + reply membership;
-- replying to a threaded message joins the same thread and preserves direct parent;
-- replies do not inherit author continuity;
-- thread membership does not create author continuity;
+- replying to a threaded message joins that same thread and preserves direct parent;
+- anonymous replies do not inherit or infer author continuity;
+- returning-author replies may deliberately carry both author and thread membership;
+- thread membership alone does not create author continuity;
 - concurrent replies must not duplicate member indexes or create split first-reply threads.
 
-### 6. Implement public discovery
+### 8. Implement public discovery
 
 Implement:
 
@@ -171,38 +232,41 @@ Discovery surfaces must never contain:
 
 - capability-bearing URLs;
 - raw capabilities;
-- re-entry URLs;
+- return/re-entry URLs;
 - caller-specific `fresh` URLs;
 - internal event/rejection details.
 
-Robots policy should allow the stable read-only public surfaces and disallow ephemeral/mutating capability routes such as `/keyboard/view`, `/keyboard/choose`, `/keyboard/read`, `/keyboard/continue`, `/keyboard/preserve`, `/keyboard/reenter`, and `/keyboard/reply`.
+Robots policy should allow the stable public read surfaces and disallow capability-bearing/mutating keyboard and return routes, including `/keyboard/view`, `/keyboard/choose`, `/keyboard/read`, `/keyboard/continue`, `/keyboard/preserve`, `/keyboard/reply`, and every `/return*` route.
 
 The sitemap must contain stable non-secret public URLs only.
 
-### 7. Implement narrow event telemetry
+### 9. Implement narrow event telemetry
 
 Record enough safe internal events to diagnose the protocol and reconstruct state transitions without duplicating message text.
 
 Events should cover at least:
 
 - entrance;
+- reply entrance;
 - successful choices;
 - completion;
 - read;
 - immediate continuation;
 - preserve;
-- re-entry;
+- return-new;
+- return-reply;
 - rejection outcomes.
 
 Do not persist:
 
 - raw capabilities;
-- capability hashes in event payloads beyond normal relational FK fields;
 - full duplicate message text;
 - IP addresses;
 - user-agent fingerprints;
 - cookies;
 - inferred identity.
+
+Read-only return browsing need not emit a page-view event for every navigation in v1.
 
 Do not implement the broader arrival/referrer/session dashboard in this slice.
 
@@ -213,45 +277,59 @@ Do not implement the broader arrival/referrer/session dashboard in this slice.
 - Do not use Loom authentication or Discord OAuth.
 - Do not add ordinary authenticated users in this slice.
 - Do not infer identity.
-- Do not merge author continuity and thread continuity.
+- Do not collapse author continuity and thread continuity.
+- A returning-author reply may explicitly establish both independent relations on the same newly created message.
 - Do not mutate completed messages.
 - Do not add semantic grouping, search, autocomplete, URL-composition helpers, free-form query writes, or alternate input transports.
 - Do not add a compatibility layer for historical Loom data.
 - Do not silently create production Cloudflare resources or credentials.
 - Do not add analytics/fingerprinting beyond the documented event trail.
+- Do not implement notifications yet.
 
 ## Acceptance criteria
 
 Automated coverage must prove at minimum:
 
-1. Canonical `/keyboard/enter` returns a `303` to a unique `fresh` entrance and does not create a message before the fresh URL is reached.
-2. Two canonical entrances produce distinct fresh redirect targets.
-3. A fresh entrance creates exactly one empty message and root capability, then redirects to its refresh-safe view.
-4. Refreshing the current `/keyboard/view` does not consume the capability, change message state, or issue a successor.
-5. The choose view exposes exactly 28 native links in deterministic `a-z`, `space`, `done` order and no forms/buttons/scripts.
-6. All links from one choose view share one raw capability.
-7. Raw capability values are absent from persisted tables.
-8. One character choice appends exactly one symbol, consumes once, issues exactly one successor, and redirects to its successor view.
-9. A sibling link from the consumed menu cannot mutate state or create another successor.
-10. Partial text remains persisted when composition stops before `done`.
-11. The 128-symbol boundary rejects another character/space without consuming the current capability, leaving `done` usable.
-12. `done` completes the message without appending text and issues one read capability.
-13. Read verifies the message binding, consumes once, and leads to a continuation view containing the exact persisted value.
-14. Immediate next-message continuation creates a distinct message plus one ordered author chain and cannot fork under sibling replay.
-15. An in-progress author member is hidden from the public author page until completion.
-16. Preserve creates a durable hash-only re-entry capability; successful re-entry consumes it once and creates exactly one new message on the same author chain.
-17. Invalid, expired, revoked, malformed, wrong-operation, wrong-message, and replayed capabilities cannot mutate state or mint successors.
-18. Concurrent capability consumption cannot fork a message or create multiple valid successors.
-19. Completed-message index and detail pages expose escaped completed text only and no capability/token material.
-20. Replying to an unthreaded completed message creates one thread with the target root and reply second.
-21. Replying to an existing threaded message joins that same thread with the correct direct parent.
-22. Replies do not inherit or infer author continuity.
-23. In-progress replies are hidden from public thread output.
-24. Concurrent first replies converge on one thread and do not duplicate thread indexes/memberships.
-25. Public author and thread pages preserve stable order and HTML-escape stored values.
-26. `llms.txt`, `robots.txt`, and `sitemap.xml` expose only stable non-secret discovery information.
-27. The full migration applies cleanly to a fresh D1 test database and `PRAGMA foreign_key_check` is clean.
-28. The entire application requires only the D1 binding and contains no Loom/Discord authentication dependencies.
+1. Canonical `/keyboard/enter` returns a `303` to a unique `fresh` entrance and creates no message before the fresh URL is reached.
+2. Two canonical new-message entrances produce distinct fresh redirect targets.
+3. Stable anonymous `/keyboard/reply?to=M` creates no message/thread/capability state and redirects to a unique fresh reply entrance.
+4. Two stable replies to the same M produce distinct fresh redirect targets.
+5. A fresh new-message entrance creates exactly one empty unaffiliated message and root capability, then redirects to its refresh-safe view.
+6. A fresh anonymous reply entrance creates exactly one reply message with thread membership/direct parent but no author membership.
+7. Refreshing the current `/keyboard/view` does not consume the capability, change message state, or issue a successor.
+8. The choose view exposes exactly 28 native links in deterministic `a-z`, `space`, `done` order and no forms/buttons/scripts.
+9. All links from one choose view share one raw capability.
+10. Raw capability values are absent from persisted tables.
+11. One character choice appends exactly one symbol, consumes once, issues exactly one successor, and redirects to its successor view.
+12. A sibling link from the consumed menu cannot mutate state or create another successor.
+13. Partial text remains persisted when composition stops before `done`.
+14. The 128-symbol boundary rejects another character/space without consuming the current capability, leaving `done` usable.
+15. `done` completes the message without appending text and issues one read capability.
+16. Read verifies the message binding, consumes once, and leads to a continuation view containing the exact persisted value.
+17. Immediate next-message continuation creates a distinct message plus one ordered author chain and cannot fork under sibling replay.
+18. An in-progress author member is hidden from the public author page until completion.
+19. Preserve creates a durable hash-only return capability bound to the author chain.
+20. Visiting/refreshing `/return?cap=R` does not consume R, create a message, or extend the author chain.
+21. Return-aware browsing through messages, message detail, threads, and author views preserves R without consuming it.
+22. Return-aware navigation/action links are complete native links; callers do not have to compose URLs.
+23. `/return/new?cap=R` creates no state and redirects to a unique fresh return-new entrance.
+24. The fresh return-new entrance consumes R once, creates exactly one new message on R's author chain, and starts ordinary keyboard composition.
+25. `/return/reply?cap=R&to=M` creates no state and redirects to a unique fresh return-reply entrance.
+26. The fresh return-reply entrance consumes R once and creates exactly one new message carrying both correct author membership and correct thread/direct-parent membership.
+27. A return-aware reply to an unthreaded target creates one thread with the target root and new reply after it.
+28. A return-aware reply to an already-threaded target joins that same thread.
+29. Racing/sibling return-new and return-reply actions using the same R cannot both create state.
+30. Invalid, expired, revoked, malformed, wrong-operation, wrong-message, and replayed capabilities cannot mutate state or mint successors.
+31. Concurrent composition capability consumption cannot fork a message or create multiple valid successors.
+32. Completed-message index and detail pages expose escaped completed text only and no capability/token material.
+33. Anonymous replies do not inherit or infer author continuity.
+34. In-progress replies are hidden from public thread output.
+35. Concurrent first anonymous replies converge on one thread and do not duplicate thread indexes/memberships.
+36. Public author and thread pages preserve stable order and HTML-escape stored values.
+37. `llms.txt`, `robots.txt`, and `sitemap.xml` expose only stable non-secret discovery information and no return/fresh/capability URLs.
+38. The full migration applies cleanly to a fresh D1 test database and `PRAGMA foreign_key_check` is clean.
+39. The entire application requires only the D1 binding and contains no Loom/Discord authentication dependencies.
+40. No notification/inbox tables or behavior are introduced in this slice.
 
 ## Required tests and checks
 
@@ -273,6 +351,7 @@ Update `README.md` so it explains:
 
 - what Stateboard is;
 - the public routes;
+- the return/possibility concept at a high level without exposing credentials;
 - local setup;
 - how to run migrations/tests/dev server;
 - what Cloudflare resources the operator must create before production deployment;
@@ -288,6 +367,7 @@ Do not implement in this slice:
 - copying/migrating production Loom Agent Lab data;
 - cross-repository synchronization;
 - a Loom-to-Stateboard bridge;
+- notifications/inbox state;
 - arrival/referrer/session dashboards;
 - IP or user-agent tracking;
 - semantic search or topic grouping;
