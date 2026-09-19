@@ -516,7 +516,7 @@ Maintain an append-only internal event trail sufficient to diagnose protocol beh
 
 Suggested table:
 
-`events(id, message_id, author_chain_id, capability_id, operation, outcome, symbol_count, created_at)`
+`events(id, message_id, author_chain_id, capability_id, operation, choice, outcome, symbol_count, created_at)`
 
 Useful operations include:
 
@@ -531,6 +531,10 @@ Useful operations include:
 - `return_new`
 - `return_reply`
 - rejection outcomes.
+
+For composition transitions, record enough structured information to reconstruct the exact append-only path without snapshotting the full message after every step. In particular, successful and rejected `choose` events should record the offered/selected canonical choice where applicable, operation, outcome, symbol count after the transition (or attempted boundary), capability lineage by normal relational reference, and timestamp. Together with the canonical message row and ordered event trail, this must be sufficient to determine which exposed transitions produced a finished or partial value.
+
+Do not duplicate the full evolving message value into every event. The message row remains canonical state; the event trail records how Stateboard permitted or rejected movement across that state-entry boundary.
 
 Read-only return browsing need not create an event for every page view in v1. Do not accidentally turn the event table into a navigation/fingerprinting log.
 
