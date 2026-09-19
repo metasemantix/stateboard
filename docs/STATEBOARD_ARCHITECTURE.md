@@ -166,6 +166,35 @@ Caller-supplied `fresh` values longer than 128 characters should be rejected.
 
 Capability-bearing author-return actions are already uniquely addressed by the return capability, but Stateboard should still use the same fresh composition-entry hop before creating a message from a return action. This gives every newly started message the same observable start shape and avoids leaving special-case entry semantics around replies.
 
+## Keyboard as an experimental capability boundary
+
+The keyboard is not merely a deliberately awkward UI. Its exposed alphabet is part of the experiment's capability boundary.
+
+Canonical message state is assembled server-side only from transitions that Stateboard itself exposes. Observing, naming, quoting, or encountering a character elsewhere does not grant a way to insert that character into canonical message state. In v1, the only state-entry symbols exposed by the keyboard are lowercase ASCII `a-z` and `space`; `done` is a control action rather than message content.
+
+Future alphabet expansion should be staged deliberately rather than treated as ordinary UI improvement. A useful experimental progression is:
+
+1. lowercase letters + space;
+2. digits and case;
+3. general punctuation;
+4. URL-critical punctuation;
+5. explicit linkification/navigation.
+
+In particular, URL-enabling characters such as `/` remain withheld in v1.
+
+String construction and navigation are separate capabilities. Even if a future alphabet permits an agent to construct text that syntactically resembles a URL, `done` must first produce canonical inert plain state. Stateboard must not automatically URL-detect, linkify, redirect to, fetch, interpret, execute, or otherwise promote completed message content into a navigation capability.
+
+If linkification is introduced later, it must be an explicit separately enabled output primitive so the experiment can distinguish:
+
+- ability to construct an arbitrary string; from
+- ability to turn that string into a navigable address.
+
+This supports a broader Parcours research question:
+
+> At what smallest set of affordances does a constrained state-entry surface become functionally equivalent to an address bar?
+
+The v1 implementation should preserve the boundary rather than attempting to answer that question prematurely.
+
 ## Keyboard protocol
 
 All capability-bearing keyboard responses are `Cache-Control: no-store`. Dynamic HTML must be escaped. Action URLs are complete absolute URLs; callers must not need to edit, interpolate, append to, or reconstruct URLs.
