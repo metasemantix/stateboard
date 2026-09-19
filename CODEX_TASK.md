@@ -118,6 +118,9 @@ Behavioral requirements:
 - an anonymous/public reply receives no author membership;
 - `/keyboard/view` is non-consuming and refresh-safe while its capability is current;
 - keyboard alphabet is exactly lowercase `a-z`, `space`, `done`;
+- treat that exposed alphabet as a capability boundary: canonical message state may change only through server-exposed choices, not from arbitrary request text;
+- `done` produces canonical inert plain state only; completed values must not be URL-detected, linkified, redirected to, fetched, interpreted, or executed;
+- do not expose digits, case, punctuation, URL-critical characters such as `/`, or any linkification/navigation primitive in v1;
 - all 28 choices in one menu share one current capability and are rendered as complete absolute native links;
 - the message limit is 128 symbols;
 - successful letter/space choice consumes one capability atomically, appends one symbol, issues exactly one successor, and redirects to its view;
@@ -244,6 +247,8 @@ The sitemap must contain stable non-secret public URLs only.
 
 Record enough safe internal events to diagnose the protocol and reconstruct state transitions without duplicating message text.
 
+For append-only composition, the event trail must be sufficient to reconstruct the exact transition path without storing a full snapshot of the evolving message at every step. Record structured transition data including the selected canonical choice where applicable, operation, outcome, symbol count, normal capability relational reference, and timestamp. The message row remains canonical state.
+
 Events should cover at least:
 
 - entrance;
@@ -285,6 +290,9 @@ Do not implement the broader arrival/referrer/session dashboard in this slice.
 - Do not silently create production Cloudflare resources or credentials.
 - Do not add analytics/fingerprinting beyond the documented event trail.
 - Do not implement notifications yet.
+- Treat the v1 keyboard alphabet as an experimental capability boundary, not a UI inconvenience to optimize away.
+- Do not accept arbitrary `choice` values merely because they are supplied in a request; only the explicitly exposed v1 alphabet may enter canonical message state.
+- Keep string construction separate from navigation. Do not auto-linkify or otherwise promote completed text into an actionable URL.
 
 ## Acceptance criteria
 
@@ -330,6 +338,9 @@ Automated coverage must prove at minimum:
 38. The full migration applies cleanly to a fresh D1 test database and `PRAGMA foreign_key_check` is clean.
 39. The entire application requires only the D1 binding and contains no Loom/Discord authentication dependencies.
 40. No notification/inbox tables or behavior are introduced in this slice.
+41. Direct requests attempting to choose characters outside lowercase `a-z` and `space` (including digits, uppercase, punctuation, and `/`) cannot alter canonical message state or mint a successful successor.
+42. `done` leaves completed message content as inert escaped plain text even when the stored value resembles a hostname or URL; Stateboard does not automatically emit a link, redirect, fetch, or other navigation primitive for that content.
+43. Ordered composition events contain enough structured transition information to reconstruct the exact exposed choices that produced a partial or completed message without storing a full message snapshot in each event.
 
 ## Required tests and checks
 
@@ -373,6 +384,9 @@ Do not implement in this slice:
 - semantic search or topic grouping;
 - arbitrary text input;
 - alternative keyboard/search-field ingress;
+- keyboard alphabet expansion beyond lowercase letters and space;
+- URL-critical punctuation such as `/`;
+- automatic or explicit linkification/navigation of constructed message values;
 - custom domains;
 - production Cloudflare resource creation;
 - human accounts/authentication;
