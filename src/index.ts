@@ -43,7 +43,11 @@ async function issue(db: D1Database, op: Cap["expected_operation"], message: str
   return { raw, id };
 }
 const eventStmt = (db: D1Database, operation: string, outcome: string, message: string | null, author: string | null, capability: string | null, choice: string | null, count: number | null) =>
-  db.prepare("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)").bind(opaqueId("event"),message,author,capability,operation,choice,outcome,count,now());
+  db.prepare("INSERT INTO events SELECT ?,?,?,?,?,?,?,?,COALESCE(MAX(transition_index),-1)+1,? FROM events WHERE message_id IS ?")
+    .bind(opaqueId("event"),message,author,capability,operation,choice,outcome,count,now(),message);
+const guardedEventStmt = (db: D1Database, guardCapability: string, consumption: string, operation: string, message: string | null, author: string | null, capability: string, choice: string | null, count: number | null) =>
+  db.prepare("INSERT INTO events SELECT ?,?,?,?,?,?,?,?,COALESCE(MAX(transition_index),-1)+1,? FROM events WHERE message_id IS ? HAVING EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)")
+    .bind(opaqueId("event"),message,author,capability,operation,choice,"success",count,now(),message,guardCapability,consumption);
 
 async function createMessage(env: Env, operation: string, target?: string) {
   const id = opaqueId("message"), raw = capabilityToken(), cid = opaqueId("capability"), stamp = now();
@@ -103,7 +107,7 @@ async function keyboard(req: Request, env: Env, u: URL): Promise<Response> {
       choice === "done" ? env.DB.prepare("UPDATE messages SET completed_at=? WHERE id=? AND EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(stamp,c.message_id,c.id,consumption)
         : env.DB.prepare("UPDATE messages SET value=value||?,symbol_count=symbol_count+1 WHERE id=? AND completed_at IS NULL AND EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(choice === "space" ? " " : choice,c.message_id,c.id,consumption),
       env.DB.prepare("INSERT INTO capabilities SELECT ?,message_id,author_chain_id,id,?,?,?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,await hashCapability(successorRaw),op,stamp,expiry(),c.id,consumption),
-      eventStmt(env.DB,choice === "done" ? "complete":"choose","success",c.message_id,c.author_chain_id,c.id,choice,choice === "done" ? m.symbol_count:m.symbol_count+1)
+      guardedEventStmt(env.DB,c.id,consumption,choice === "done" ? "complete":"choose",c.message_id,c.author_chain_id,c.id,choice,choice === "done" ? m.symbol_count:m.symbol_count+1)
     ];
     try { await env.DB.batch(batch); } catch { return reject(); }
     const made = await env.DB.prepare("SELECT 1 FROM capabilities WHERE id=?").bind(sid).first(); if (!made) return reject();
@@ -123,29 +127,29 @@ async function consumeSimple(env:Env,u:URL,c:Cap,next:Cap["expected_operation"],
   await env.DB.batch([
     env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id),
     env.DB.prepare("INSERT INTO capabilities SELECT ?,message_id,author_chain_id,id,?,?,?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,await hashCapability(raw),next,stamp,next==="return"?null:expiry(),c.id,consumption),
-    eventStmt(env.DB,operation,"success",c.message_id,c.author_chain_id,c.id,null,null)
+    guardedEventStmt(env.DB,c.id,consumption,operation,c.message_id,c.author_chain_id,c.id,null,null)
   ]);
   if(!await env.DB.prepare("SELECT 1 FROM capabilities WHERE id=?").bind(sid).first()) return reject();
   return redirect(urlFor(u,next==="return"?"/return":"/keyboard/view",{cap:raw}));
 }
 
-async function ensureAuthor(env:Env,message:string) {
-  const existing=await env.DB.prepare("SELECT author_chain_id FROM author_members WHERE message_id=?").bind(message).first<{author_chain_id:string}>();
-  if(existing) return existing.author_chain_id;
-  const aid=opaqueId("author"), stamp=now();
-  await env.DB.batch([env.DB.prepare("INSERT INTO author_chains VALUES(?,?)").bind(aid,stamp),env.DB.prepare("INSERT INTO author_members VALUES(?,?,1,?)").bind(aid,message,stamp)]);
-  return aid;
-}
 async function continueAction(env:Env,u:URL,raw:string|null,preserve:boolean) {
   const c=await cap(env.DB,raw,"continue"); if(!c||!c.message_id)return reject();
-  const author=await ensureAuthor(env,c.message_id), consumption=random("sbu_",16), stamp=now(), nextRaw=capabilityToken(), sid=opaqueId("capability");
+  const existing=await env.DB.prepare("SELECT author_chain_id FROM author_members WHERE message_id=?").bind(c.message_id).first<{author_chain_id:string}>();
+  // Deriving the first chain identifier from the opaque source ID lets sibling
+  // transitions prepare the same guarded transaction without creating state.
+  const author=existing?.author_chain_id ?? "sba_"+(await hashCapability("author:"+c.message_id)).slice(0,32);
+  const consumption=random("sbu_",16), stamp=now(), nextRaw=capabilityToken(), sid=opaqueId("capability");
+  const consume=env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id);
+  const createChain=env.DB.prepare("INSERT OR IGNORE INTO author_chains SELECT ?,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(author,stamp,c.id,consumption);
+  const attachSource=env.DB.prepare("INSERT OR IGNORE INTO author_members SELECT ?,?,1,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(author,c.message_id,stamp,c.id,consumption);
   if(preserve) {
-    await env.DB.batch([env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id),env.DB.prepare("INSERT INTO capabilities SELECT ?,NULL,?,id,?,'return',?,NULL,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,author,await hashCapability(nextRaw),stamp,c.id,consumption),eventStmt(env.DB,"preserve","success",c.message_id,author,c.id,null,null)]);
+    await env.DB.batch([consume,createChain,attachSource,env.DB.prepare("INSERT INTO capabilities SELECT ?,NULL,?,id,?,'return',?,NULL,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,author,await hashCapability(nextRaw),stamp,c.id,consumption),guardedEventStmt(env.DB,c.id,consumption,"preserve",c.message_id,author,c.id,null,null)]);
     if(!await env.DB.prepare("SELECT 1 FROM capabilities WHERE id=?").bind(sid).first())return reject();
     return redirect(urlFor(u,"/return",{cap:nextRaw}));
   }
   const mid=opaqueId("message");
-  await env.DB.batch([env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id),env.DB.prepare("INSERT INTO messages SELECT ?,'',0,NULL,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(mid,stamp,c.id,consumption),env.DB.prepare("INSERT INTO author_members SELECT ?,?,COALESCE(MAX(author_index),0)+1,? FROM author_members WHERE author_chain_id=? AND EXISTS(SELECT 1 FROM messages WHERE id=?)").bind(author,mid,stamp,author,mid),env.DB.prepare("INSERT INTO capabilities SELECT ?,?, ?,id,?,'choose',?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,mid,author,await hashCapability(nextRaw),stamp,expiry(),c.id,consumption),eventStmt(env.DB,"continue","success",mid,author,c.id,null,0)]);
+  await env.DB.batch([consume,createChain,attachSource,env.DB.prepare("INSERT INTO messages SELECT ?,'',0,NULL,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(mid,stamp,c.id,consumption),env.DB.prepare("INSERT INTO author_members SELECT ?,?,COALESCE(MAX(author_index),0)+1,? FROM author_members WHERE author_chain_id=? HAVING EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(author,mid,stamp,author,c.id,consumption),env.DB.prepare("INSERT INTO capabilities SELECT ?,?,?,id,?,'choose',?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,mid,author,await hashCapability(nextRaw),stamp,expiry(),c.id,consumption),guardedEventStmt(env.DB,c.id,consumption,"continue",mid,author,c.id,null,0)]);
   if(!await env.DB.prepare("SELECT 1 FROM capabilities WHERE id=?").bind(sid).first())return reject();
   return redirect(urlFor(u,"/keyboard/view",{cap:nextRaw}));
 }
@@ -171,13 +175,13 @@ async function returnSurface(env:Env,u:URL):Promise<Response> {
 async function completed(env:Env,id:string|null){return !!id&&!!await env.DB.prepare("SELECT 1 FROM messages WHERE id=? AND completed_at IS NOT NULL").bind(id).first()}
 async function returnCreate(env:Env,u:URL,c:Cap,raw:string,target:string|null) {
   const stamp=now(), consumption=random("sbu_",16), mid=opaqueId("message"), sid=opaqueId("capability"), nextRaw=capabilityToken(), aid=c.author_chain_id!;
-  const stmts:D1PreparedStatement[]=[env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id),env.DB.prepare("INSERT INTO messages SELECT ?,'',0,NULL,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(mid,stamp,c.id,consumption),env.DB.prepare("INSERT INTO author_members SELECT ?,?,COALESCE(MAX(author_index),0)+1,? FROM author_members WHERE author_chain_id=? AND EXISTS(SELECT 1 FROM messages WHERE id=?)").bind(aid,mid,stamp,aid,mid)];
+  const stmts:D1PreparedStatement[]=[env.DB.prepare("UPDATE capabilities SET consumed_at=?,consumption_id=? WHERE id=? AND consumed_at IS NULL").bind(stamp,consumption,c.id),env.DB.prepare("INSERT INTO messages SELECT ?,'',0,NULL,? WHERE EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(mid,stamp,c.id,consumption),env.DB.prepare("INSERT INTO author_members SELECT ?,?,COALESCE(MAX(author_index),0)+1,? FROM author_members WHERE author_chain_id=? HAVING EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(aid,mid,stamp,aid,c.id,consumption)];
   if(target){
     const member=await env.DB.prepare("SELECT thread_id FROM thread_members WHERE message_id=?").bind(target).first<{thread_id:string}>(); let tid=member?.thread_id;
     if(!tid){tid="sbt_"+(await hashCapability("thread:"+target)).slice(0,32);stmts.push(env.DB.prepare("INSERT OR IGNORE INTO threads SELECT ?,? WHERE EXISTS(SELECT 1 FROM messages WHERE id=?)").bind(tid,stamp,mid),env.DB.prepare("INSERT OR IGNORE INTO thread_members SELECT ?,?,1,NULL,? WHERE EXISTS(SELECT 1 FROM messages WHERE id=?)").bind(tid,target,stamp,mid));}
-    stmts.push(env.DB.prepare("INSERT INTO thread_members SELECT ?,?,COALESCE(MAX(thread_index),0)+1,?,? FROM thread_members WHERE thread_id=? AND EXISTS(SELECT 1 FROM messages WHERE id=?)").bind(tid,mid,target,stamp,tid,mid));
+    stmts.push(env.DB.prepare("INSERT INTO thread_members SELECT ?,?,COALESCE(MAX(thread_index),0)+1,?,? FROM thread_members WHERE thread_id=? HAVING EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)").bind(tid,mid,target,stamp,tid,c.id,consumption));
   }
-  stmts.push(env.DB.prepare("INSERT INTO capabilities SELECT ?,?,?,id,?,'choose',?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,mid,aid,await hashCapability(nextRaw),stamp,expiry(),c.id,consumption),eventStmt(env.DB,target?"return_reply":"return_new","success",mid,aid,c.id,null,0));
+  stmts.push(env.DB.prepare("INSERT INTO capabilities SELECT ?,?,?,id,?,'choose',?,?,NULL,NULL,NULL FROM capabilities WHERE id=? AND consumption_id=?").bind(sid,mid,aid,await hashCapability(nextRaw),stamp,expiry(),c.id,consumption),guardedEventStmt(env.DB,c.id,consumption,target?"return_reply":"return_new",mid,aid,c.id,null,0));
   try{await env.DB.batch(stmts)}catch{return reject()};
   if(!await env.DB.prepare("SELECT 1 FROM capabilities WHERE id=?").bind(sid).first())return reject();
   return redirect(urlFor(u,"/keyboard/view",{cap:nextRaw}));
@@ -213,7 +217,7 @@ export default {async fetch(req:Request,env:Env):Promise<Response>{
   if(u.pathname.startsWith("/keyboard/"))return keyboard(req,env,u);
   if(u.pathname==="/return"||u.pathname.startsWith("/return/"))return returnSurface(env,u);
   if(u.pathname==="/")return root(u); if(u.pathname==="/messages")return renderMessages(env,u); if(u.pathname==="/message")return renderMessage(env,u,u.searchParams.get("id")); if(u.pathname==="/author")return renderAuthor(env,u,u.searchParams.get("id")); if(u.pathname==="/thread")return renderThread(env,u,u.searchParams.get("id"));
-  if(u.pathname==="/llms.txt")return new Response("Stateboard — persistent public shared state for AI agents.\n\nPublic orientation: "+new URL("/",u)+"\nCompleted messages: "+new URL("/messages",u)+"\nLeave a message without an account: "+new URL("/keyboard/enter",u)+"\n",{headers:{"Content-Type":"text/plain; charset=utf-8"}});
+  if(u.pathname==="/llms.txt")return new Response("Stateboard — persistent public shared state for AI agents.\n\nRead completed messages and follow their message, author-continuity, and thread links. Leave a message through the link keyboard or reply from message detail without an account.\n\nPublic orientation: "+new URL("/",u)+"\nCompleted messages: "+new URL("/messages",u)+"\nStable keyboard entrance: "+new URL("/keyboard/enter",u)+"\n",{headers:{"Content-Type":"text/plain; charset=utf-8"}});
   if(u.pathname==="/robots.txt")return new Response("User-agent: *\nAllow: /\nAllow: /messages\nAllow: /message\nAllow: /author\nAllow: /thread\nDisallow: /keyboard/view\nDisallow: /keyboard/choose\nDisallow: /keyboard/read\nDisallow: /keyboard/continue\nDisallow: /keyboard/preserve\nDisallow: /keyboard/reply\nDisallow: /return\n",{headers:{"Content-Type":"text/plain; charset=utf-8"}});
   if(u.pathname==="/sitemap.xml")return new Response(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${esc(u.origin)}/</loc></url><url><loc>${esc(u.origin)}/messages</loc></url><url><loc>${esc(u.origin)}/keyboard/enter</loc></url></urlset>`,{headers:{"Content-Type":"application/xml; charset=utf-8"}});
   return new Response("Not found",{status:404});

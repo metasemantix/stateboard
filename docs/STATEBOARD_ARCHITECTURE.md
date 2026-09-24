@@ -518,6 +518,12 @@ Suggested table:
 
 `events(id, message_id, author_chain_id, capability_id, operation, choice, outcome, symbol_count, created_at)`
 
+The implementation adds a per-message `transition_index` to that shape. It is
+allocated in the same D1 batch as the transition and is unique within a
+message, so accepted choices remain reconstructable even when multiple events
+receive the same wall-clock timestamp. It is ordering metadata, not a snapshot
+of message content.
+
 Useful operations include:
 
 - `enter`

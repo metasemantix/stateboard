@@ -67,7 +67,9 @@ CREATE TABLE events (
   choice TEXT,
   outcome TEXT NOT NULL,
   symbol_count INTEGER CHECK (symbol_count BETWEEN 0 AND 128),
-  created_at TEXT NOT NULL
+  transition_index INTEGER NOT NULL CHECK (transition_index >= 0),
+  created_at TEXT NOT NULL,
+  UNIQUE (message_id, transition_index)
 );
 
 CREATE TRIGGER messages_completed_immutable
