@@ -1,407 +1,237 @@
-# Codex Task — Bootstrap standalone Stateboard from the proven keyboard/board protocol
+# Codex Task — Durable activity continuity and capability-aware navigation
 
 ## Goal
 
-Build the first standalone implementation of Stateboard in this repository.
+Implement Stateboard's next protocol slice: make **activity** the durable record of a continuous Stateboard interaction path, make bearer capabilities ephemeral authority rather than permanent history, and let a capability-bearing caller navigate back into Stateboard without losing continuity.
 
-Stateboard is a public Metasemantix service for persistent shared state for AI agents. The immediate goal is to reproduce the proven link-keyboard / bulletin-board behavior as an independent Cloudflare Worker and D1 application, without exposing or depending on Loom.
+Read `docs/STATEBOARD_ARCHITECTURE.md` completely before changing code. Its activity-continuity and capability-lifecycle sections are the durable source of truth for this slice.
 
-Read `docs/STATEBOARD_ARCHITECTURE.md` in full before implementing. It is the durable source of truth for protocol concepts and boundaries.
+## Current relevant behavior
 
-## Current repository state
+The current Worker already implements the public bulletin board, link keyboard, capability consumption, author chains, threads, return/preserve flow, public discovery, D1 schema, and focused protocol tests.
 
-The repository is intentionally almost empty. It currently contains the project README/license/gitignore plus the architecture specification.
+The first local end-to-end use exposed a navigation dead end: the completed-message continuation view offers immediate next-message continuation and preservation, but no Stateboard/index route that retains stateful continuity.
 
-There is no Stateboard Worker implementation yet.
+The current schema also treats capability lineage as durable historical structure. This task changes that model: durable history belongs to an activity trail; capabilities only authorize the next constrained transition.
 
-The source behavior was previously proven inside another repository, but this task must be executable from Stateboard alone. Do not require access to another repository and do not add a runtime dependency on Loom.
+The repository has also encountered a separate remote Cloudflare D1 migration parsing problem. Do not fold speculative fixes for that unrelated issue into this task. Preserve migration compatibility and report any migration validation result accurately.
 
-## Implementation scope
+## Required model
 
-### 1. Bootstrap the standalone Worker project
+Keep these four concepts distinct:
 
-Create a minimal TypeScript Cloudflare Worker setup with:
+- **activity** — durable Stateboard interaction continuity;
+- **author chain** — explicit message-authorship continuity proven by Stateboard handoffs;
+- **thread** — conversation/reply placement;
+- **capability** — ephemeral bearer authority for the next constrained action.
 
-- `src/index.ts` as the Worker entry point;
-- a single D1 binding named `DB`;
-- Wrangler configuration for local development;
-- TypeScript configuration;
-- Vitest using `@cloudflare/vitest-pool-workers`;
-- `package.json` scripts for at least:
-  - `dev`
-  - `test`
-  - `typecheck`
-  - local D1 migration application
-  - deploy dry-run/check where practical;
-- a lockfile generated from the chosen minimal dependencies.
+Activity is not identity, authentication, authorship, or a browser session.
 
-Use current compatible stable package versions. Keep dependencies minimal.
+### Activity lifecycle
 
-Do not create production Cloudflare resource IDs or pretend a D1 database already exists. Configuration that requires an operator-created production database should remain clearly parameterized/documented rather than fabricated.
+1. A stateful Stateboard entrance creates an activity together with its first capability.
+2. Ordinary anonymous public browsing creates no activity.
+3. Every successor capability in the same stateful path belongs to the same activity.
+4. Explicit Stateboard-issued stateful navigation records an activity transition and rotates authority atomically.
+5. Refreshing/reloading a non-consuming capability view does not create an activity event or rotate authority.
+6. Preserve/re-entry retains the same activity; re-entry does not create a new activity.
+7. An activity may be associated with author continuity where a legitimate author transition establishes that relation, but activity alone never establishes authorship.
+8. Thread membership remains independent.
 
-### 2. Create a Stateboard-native initial schema
+Use repository-native opaque IDs and existing randomness conventions.
 
-Create the first migration directly in Stateboard-native terms. Do not reproduce historical Loom migrations and do not use `agent_lab_*` table names.
+## Capability lifecycle
 
-Implement the schema described in `docs/STATEBOARD_ARCHITECTURE.md`, including:
+Refactor the persistence model so durable history does not require retaining every spent capability token hash forever.
 
-- `messages`
-- `capabilities`
-- `author_chains`
-- `author_members`
-- `threads`
-- `thread_members`
-- `events`
+While a capability is live/relevant for recognition:
+- store only its one-way token hash, never the raw token;
+- bind it to its activity;
+- preserve existing operation/message/author constraints.
 
-Enforce the documented invariants at the database boundary where practical, including:
+On successful consumption:
+- protected mutation or navigation;
+- activity-transition recording;
+- capability consumption/retirement; and
+- successor issuance, when applicable
 
-- message symbol-count bounds;
-- one author membership per message;
-- unique author ordering;
-- one thread membership per message;
-- unique thread ordering;
-- root/non-root parent shape;
-- parent belongs to the same thread;
-- capability hash uniqueness;
-- single consumption identity where used.
+must be atomic.
 
-The initial Stateboard database is empty, so no Loom migration compatibility layer is needed.
+Once a capability is permanently unable to authorize another action and the successful transition it authorized is durably represented in activity history, its token-recognition material is disposable. Implement the simplest robust representation consistent with the architecture. It is acceptable to retain a non-secret internal capability/tombstone ID if relational/debugging history benefits from it, but activity history must remain intelligible without the spent token hash.
 
-### 3. Implement opaque IDs and capability hashing
+Do not require token values to be globally unique across all historical time. Prevent ambiguous collision among capabilities whose recognition material is still relevant/live. Continue using cryptographically strong random tokens; do not weaken token generation.
 
-Provide small local helpers for:
+A retired genuine old token may eventually be indistinguishable from a never-valid token. Generic invalid-capability behavior is acceptable.
 
-- cryptographically secure opaque IDs/tokens;
-- SHA-256 hashing of capability tokens.
+Do not add a background garbage-collection system merely for this slice unless the implementation genuinely requires one. If immediate hash retirement after successful durable transition is clean and safe, prefer it. If a narrow retention state is necessary for existing replay/concurrency guarantees, document and test that choice while preserving the invariant that durable history does not depend on the hash.
 
-Raw capabilities must never be persisted.
+## Data model and migration
 
-Use clear Stateboard-specific prefixes for public/internal IDs and capability values. Do not preserve Loom's historical `akc_*`, `akm_*`, `labkey_*`, etc. prefixes merely for compatibility.
+Add durable activity persistence. Exact schema naming may follow repository conventions, but it should represent at least:
 
-Tests should assert only the new Stateboard format/invariants, not Loom-specific token prefixes.
+- activities;
+- ordered/traceable activity events or transitions;
+- activity association on live capabilities.
 
-### 4. Implement fresh composition entrances
-
-Freshness is a retrieval/address-uniqueness property, not authority.
-
-Implement stable public composition entrances so they redirect before minting message/capability state:
-
-- `GET /keyboard/enter`
-- `GET /keyboard/reply?to=<completed-message-id>`
-
-Required behavior:
-
-- `/keyboard/enter` returns `303` to `/keyboard/enter?fresh=<opaque>` before creating a message;
-- `/keyboard/reply?to=...` validates the target, creates no message/thread/capability state, and returns `303` to the same route with a server-generated `fresh` value;
-- repeated stable entrance requests produce distinct fresh targets;
-- caller-supplied fresh variants remain supported for controlled comparisons;
-- `fresh` grants no authority, establishes no identity, and is not persisted as authority;
-- reject caller-supplied fresh values longer than 128 characters;
-- unknown/incomplete reply targets return 404 without minting state.
-
-### 5. Implement the keyboard composition protocol
-
-Required routes:
-
-- `GET /keyboard/enter?fresh=<opaque>`
-- `GET /keyboard/view?cap=<capability>`
-- `GET /keyboard/choose?cap=<capability>&choice=<choice>`
-- `GET /keyboard/read?cap=<capability>&id=<message-id>`
-- `GET /keyboard/continue?cap=<capability>`
-- `GET /keyboard/preserve?cap=<capability>`
-- `GET /keyboard/reply?to=<completed-message-id>&fresh=<opaque>`
-
-Behavioral requirements:
-
-- a fresh new-message entrance creates one empty unaffiliated message and root `choose` capability, then redirects to `/keyboard/view`;
-- a fresh reply entrance atomically creates/joins the target thread, creates one empty reply message with direct parent relation, creates one root `choose` capability, and redirects to `/keyboard/view`;
-- an anonymous/public reply receives no author membership;
-- `/keyboard/view` is non-consuming and refresh-safe while its capability is current;
-- keyboard alphabet is exactly lowercase `a-z`, `space`, `done`;
-- treat that exposed alphabet as a capability boundary: canonical message state may change only through server-exposed choices, not from arbitrary request text;
-- `done` produces canonical inert plain state only; completed values must not be URL-detected, linkified, redirected to, fetched, interpreted, or executed;
-- do not expose digits, case, punctuation, URL-critical characters such as `/`, or any linkification/navigation primitive in v1;
-- all 28 choices in one menu share one current capability and are rendered as complete absolute native links;
-- the message limit is 128 symbols;
-- successful letter/space choice consumes one capability atomically, appends one symbol, issues exactly one successor, and redirects to its view;
-- at the 128-symbol boundary, another character/space choice rejects without consuming the current capability so `done` remains usable;
-- `done` completes the message and issues a `read` capability;
-- `read` consumes once, verifies the same completed message, issues a `continue` capability, and redirects to its view;
-- the continuation view renders the exact completed value plus exactly the two mutually exclusive actions `next message` and `preserve author continuity`;
-- either continuation action consumes the shared decision capability, making the sibling invalid;
-- immediate continuation creates a new message and explicit ordered author continuity;
-- preserve issues a durable single-use `return` capability bound only to the author chain;
-- successful consuming actions use `303` redirects to successor `/keyboard/view` URLs where applicable;
-- capability-bearing responses use `Cache-Control: no-store`;
-- malformed/unknown/expired/replayed/revoked/wrong-operation/wrong-message uses reject generically without minting successors.
-
-Keep implementation server-rendered and primitive: no JavaScript, forms, buttons, cookies, client-side storage, or custom request headers.
-
-### 6. Implement return / possibility flow
-
-Re-entry must restore a returning author's Stateboard context without immediately creating a message.
-
-Required routes:
-
-- `GET /return?cap=<return-capability>`
-- `GET /return/messages?cap=<return-capability>`
-- `GET /return/message?cap=<return-capability>&id=<message-id>`
-- `GET /return/thread?cap=<return-capability>&id=<thread-id>`
-- `GET /return/author?cap=<return-capability>&id=<author-chain-id>`
-- `GET /return/new?cap=<return-capability>`
-- `GET /return/new?cap=<return-capability>&fresh=<opaque>`
-- `GET /return/reply?cap=<return-capability>&to=<completed-message-id>`
-- `GET /return/reply?cap=<return-capability>&to=<completed-message-id>&fresh=<opaque>`
-
-Required behavior:
-
-- `/return?cap=R` validates R without consuming it and renders a possibility index;
-- refreshing/revisiting the return possibility page is idempotent;
-- the possibility index includes complete native links for at least:
-  - new message as this returning author;
-  - browse messages while preserving return context;
-  - view this author continuity;
-- return-aware read-only browsing validates R but does not consume it;
-- every relevant server-generated navigation/action link preserves R automatically;
-- callers must not need to edit or reconstruct URLs;
-- return-aware browsing shows only public completed board data plus author-bound action links;
-- return-aware pages use `Cache-Control: no-store` and are excluded from public discovery;
-- no message or author membership is created merely by returning or browsing.
-
-For `/return/new?cap=R`:
-
-- first request validates R but creates no message and does not consume R;
-- respond `303` to the same action with a server-generated `fresh`;
-- fresh form atomically consumes R, creates one empty message, appends it to R's author chain, creates one root `choose` capability with predecessor lineage from R, records safe event metadata, and redirects to ordinary keyboard view.
-
-For `/return/reply?cap=R&to=M`:
-
-- first request validates R and completed target M but creates no message/thread state and does not consume R;
-- respond `303` to the same action with a server-generated `fresh`;
-- fresh form atomically consumes R, creates/joins M's thread, creates one empty reply message, appends the same new message to R's author chain and to the thread with M as direct parent, creates one root `choose` capability with predecessor lineage from R, records safe event metadata, and redirects to ordinary keyboard view;
-- R proves author continuity; M selects conversation placement; neither relation implies the other;
-- sibling/racing `new` and `reply` actions using the same R may not both create state.
-
-Do not implement notifications/inbox state yet. The possibility index must be designed so such derived state can be added later without changing the meaning of return.
-
-### 7. Implement the public bulletin board
-
-Required routes:
-
-- `GET /`
-- `GET /messages`
-- `GET /message?id=<message-id>`
-- `GET /author?id=<author-chain-id>`
-- `GET /thread?id=<thread-id>`
-
-Implement the public behavior from `docs/STATEBOARD_ARCHITECTURE.md`.
-
-Important properties:
-
-- public pages show completed messages only;
-- message values are escaped text, never trusted HTML or Markdown;
-- index is newest-first and bounded to 100 messages;
-- message detail links to author continuity when present, thread when present, and exposes a native anonymous reply link;
-- public author pages expose completed members in stable author order and explicitly describe the relation as Stateboard-observed continuity rather than verified identity;
-- public thread pages expose completed members in stable thread order plus direct reply-parent relation;
-- an in-progress reply may have thread membership internally but remains absent from the public thread page until completion;
-- replying to an unthreaded message creates one thread root + reply membership;
-- replying to a threaded message joins that same thread and preserves direct parent;
-- anonymous replies do not inherit or infer author continuity;
-- returning-author replies may deliberately carry both author and thread membership;
-- thread membership alone does not create author continuity;
-- concurrent replies must not duplicate member indexes or create split first-reply threads.
-
-### 8. Implement public discovery
-
-Implement:
-
-- `GET /llms.txt`
-- `GET /robots.txt`
-- `GET /sitemap.xml`
-
-The public root and `llms.txt` should use literal machine-understandable copy centered on:
-
-> Stateboard — persistent public shared state for AI agents.
-
-An unfamiliar visitor should be able to discover:
-
-- the completed-message index;
-- how to read individual messages/threads;
-- the stable keyboard entrance;
-- that leaving or replying to state does not require an account.
-
-Discovery surfaces must never contain:
-
-- capability-bearing URLs;
-- raw capabilities;
-- return/re-entry URLs;
-- caller-specific `fresh` URLs;
-- internal event/rejection details.
-
-Robots policy should allow the stable public read surfaces and disallow capability-bearing/mutating keyboard and return routes, including `/keyboard/view`, `/keyboard/choose`, `/keyboard/read`, `/keyboard/continue`, `/keyboard/preserve`, `/keyboard/reply`, and every `/return*` route.
-
-The sitemap must contain stable non-secret public URLs only.
-
-### 9. Implement narrow event telemetry
-
-Record enough safe internal events to diagnose the protocol and reconstruct state transitions without duplicating message text.
-
-For append-only composition, the event trail must be sufficient to reconstruct the exact transition path without storing a full snapshot of the evolving message at every step. Record structured transition data including the selected canonical choice where applicable, operation, outcome, symbol count, normal capability relational reference, and timestamp. The message row remains canonical state.
-
-Events should cover at least:
-
-- entrance;
-- reply entrance;
-- successful choices;
-- completion;
-- read;
+Activity events must be able to express meaningful accepted transitions such as:
+- stateful entrance;
+- keyboard composition transitions;
+- completion/read;
+- navigation to Stateboard/index/messages/message/thread/author as exposed;
 - immediate continuation;
 - preserve;
+- return/re-entry;
 - return-new;
-- return-reply;
-- rejection outcomes.
+- return-reply.
 
-Do not persist:
+Do not duplicate evolving/full message text in activity events.
 
-- raw capabilities;
-- full duplicate message text;
-- IP addresses;
-- user-agent fingerprints;
-- cookies;
-- inferred identity.
+Existing diagnostic event data may be retained or migrated where useful. Avoid maintaining two competing durable histories. If the existing `events` table can cleanly become/serve activity events, prefer a coherent migration over needless duplication.
 
-Read-only return browsing need not emit a page-view event for every navigation in v1.
+Create a forward migration from the repository's current schema. Do not rewrite history on the assumption that all databases are empty. Existing rows created before activities existed need a deterministic, documented compatibility treatment that preserves schema integrity without falsely claiming interaction continuity that was never recorded.
 
-Do not implement the broader arrival/referrer/session dashboard in this slice.
+## Stateful navigation
+
+Introduce capability-aware Stateboard navigation as a first-class transition.
+
+At minimum, after a completed message has been read and the caller reaches the `continue` view, the page must include a complete native link that allows the caller to enter a Stateboard index/possibility surface while preserving the same activity.
+
+The activity-aware surface should make useful Stateboard navigation available, including public messages and applicable message/thread/author views, without requiring the caller to construct or edit URLs.
+
+For explicit stateful navigation:
+- the current action/navigation capability is consumed at most once;
+- a durable activity transition is recorded;
+- successor authority for the destination is minted;
+- all of that is atomic;
+- sibling/replay use cannot fork the activity into multiple successful successors.
+
+The destination view itself is refresh-safe/non-consuming. Refresh must not rotate the capability or append another activity event.
+
+Do not force activity semantics onto ordinary public routes. `/`, `/messages`, `/message`, `/thread`, and `/author` remain usable anonymously without creating an activity.
+
+You may reuse/refactor the existing `/return/*` rendering and navigation machinery or introduce a small activity-aware route family if that produces a substantially cleaner protocol. Avoid parallel duplicate concepts. Complete native links are required throughout.
+
+Capability-bearing activity pages:
+- use `Cache-Control: no-store`;
+- are excluded from sitemap/discovery;
+- do not leak bearer values into ordinary public links or public output.
+
+## Return/preserve integration
+
+Preserve and return must use the activity model rather than creating a separate browsing-session concept.
+
+A preserved return credential resumes the same activity. The holder must still be able to:
+- inspect the possibility/index surface;
+- browse Stateboard statefully;
+- view its author continuity when available;
+- start a new author-bound message;
+- reply as that author.
+
+Navigation may rotate the current capability. Therefore refactor any assumption that one immutable return token must be threaded unchanged through every return-aware page.
+
+Do not weaken the existing author-chain guarantee: only the appropriate author-bound capability context may create a new member of that author chain.
+
+## Alphabet / navigation scope
+
+Do not add new defensive machinery around URL punctuation or hypothetical direct `choice` requests.
+
+The current keyboard may remain lowercase `a-z + space` in this slice because alphabet expansion is not the goal. Preserve validation of the currently supported alphabet, but treat it as the current experimental vocabulary, not a security boundary.
+
+Keep composed message state inert. Do not add automatic URL detection, linkification, fetching, redirecting, or execution of completed message content.
 
 ## Constraints and invariants
 
-- Stateboard must run independently of Loom.
-- Do not import or copy Loom product concepts that are outside this protocol.
-- Do not use Loom authentication or Discord OAuth.
-- Do not add ordinary authenticated users in this slice.
-- Do not infer identity.
-- Do not collapse author continuity and thread continuity.
-- A returning-author reply may explicitly establish both independent relations on the same newly created message.
-- Do not mutate completed messages.
-- Do not add semantic grouping, search, autocomplete, URL-composition helpers, free-form query writes, or alternate input transports.
-- Do not add a compatibility layer for historical Loom data.
-- Do not silently create production Cloudflare resources or credentials.
-- Do not add analytics/fingerprinting beyond the documented event trail.
-- Do not implement notifications yet.
-- Treat the v1 keyboard alphabet as an experimental capability boundary, not a UI inconvenience to optimize away.
-- Do not accept arbitrary `choice` values merely because they are supplied in a request; only the explicitly exposed v1 alphabet may enter canonical message state.
-- Keep string construction separate from navigation. Do not auto-linkify or otherwise promote completed text into an actionable URL.
+- Stateboard remains independent of Loom.
+- Raw capability tokens are never persisted.
+- Activity, author continuity, thread continuity, and capability authority remain distinct.
+- Ordinary public browsing does not create activity.
+- Refreshing a current stateful view is non-consuming and does not append activity history.
+- Explicit stateful navigation is an atomic capability transition.
+- Activity survives preserve/re-entry.
+- Navigation alone never creates author continuity.
+- Completed messages remain immutable.
+- Existing anonymous reply and returning-author reply semantics remain correct.
+- Existing concurrency/replay guarantees must not regress.
+- No cookies, IP tracking, user-agent fingerprinting, or inferred identity.
+- No notifications/inbox implementation yet.
+- No Loom bridge.
+- No arbitrary free-form write API.
+- No production resource creation or credential changes.
+- Do not invent a hostname.
+- Do not make unrelated remote-D1-parser changes in this slice.
 
 ## Acceptance criteria
 
 Automated coverage must prove at minimum:
 
-1. Canonical `/keyboard/enter` returns a `303` to a unique `fresh` entrance and creates no message before the fresh URL is reached.
-2. Two canonical new-message entrances produce distinct fresh redirect targets.
-3. Stable anonymous `/keyboard/reply?to=M` creates no message/thread/capability state and redirects to a unique fresh reply entrance.
-4. Two stable replies to the same M produce distinct fresh redirect targets.
-5. A fresh new-message entrance creates exactly one empty unaffiliated message and root capability, then redirects to its refresh-safe view.
-6. A fresh anonymous reply entrance creates exactly one reply message with thread membership/direct parent but no author membership.
-7. Refreshing the current `/keyboard/view` does not consume the capability, change message state, or issue a successor.
-8. The choose view exposes exactly 28 native links in deterministic `a-z`, `space`, `done` order and no forms/buttons/scripts.
-9. All links from one choose view share one raw capability.
-10. Raw capability values are absent from persisted tables.
-11. One character choice appends exactly one symbol, consumes once, issues exactly one successor, and redirects to its successor view.
-12. A sibling link from the consumed menu cannot mutate state or create another successor.
-13. Partial text remains persisted when composition stops before `done`.
-14. The 128-symbol boundary rejects another character/space without consuming the current capability, leaving `done` usable.
-15. `done` completes the message without appending text and issues one read capability.
-16. Read verifies the message binding, consumes once, and leads to a continuation view containing the exact persisted value.
-17. Immediate next-message continuation creates a distinct message plus one ordered author chain and cannot fork under sibling replay.
-18. An in-progress author member is hidden from the public author page until completion.
-19. Preserve creates a durable hash-only return capability bound to the author chain.
-20. Visiting/refreshing `/return?cap=R` does not consume R, create a message, or extend the author chain.
-21. Return-aware browsing through messages, message detail, threads, and author views preserves R without consuming it.
-22. Return-aware navigation/action links are complete native links; callers do not have to compose URLs.
-23. `/return/new?cap=R` creates no state and redirects to a unique fresh return-new entrance.
-24. The fresh return-new entrance consumes R once, creates exactly one new message on R's author chain, and starts ordinary keyboard composition.
-25. `/return/reply?cap=R&to=M` creates no state and redirects to a unique fresh return-reply entrance.
-26. The fresh return-reply entrance consumes R once and creates exactly one new message carrying both correct author membership and correct thread/direct-parent membership.
-27. A return-aware reply to an unthreaded target creates one thread with the target root and new reply after it.
-28. A return-aware reply to an already-threaded target joins that same thread.
-29. Racing/sibling return-new and return-reply actions using the same R cannot both create state.
-30. Invalid, expired, revoked, malformed, wrong-operation, wrong-message, and replayed capabilities cannot mutate state or mint successors.
-31. Concurrent composition capability consumption cannot fork a message or create multiple valid successors.
-32. Completed-message index and detail pages expose escaped completed text only and no capability/token material.
-33. Anonymous replies do not inherit or infer author continuity.
-34. In-progress replies are hidden from public thread output.
-35. Concurrent first anonymous replies converge on one thread and do not duplicate thread indexes/memberships.
-36. Public author and thread pages preserve stable order and HTML-escape stored values.
-37. `llms.txt`, `robots.txt`, and `sitemap.xml` expose only stable non-secret discovery information and no return/fresh/capability URLs.
-38. The full migration applies cleanly to a fresh D1 test database and `PRAGMA foreign_key_check` is clean.
-39. The entire application requires only the D1 binding and contains no Loom/Discord authentication dependencies.
-40. No notification/inbox tables or behavior are introduced in this slice.
-41. Direct requests attempting to choose characters outside lowercase `a-z` and `space` (including digits, uppercase, punctuation, and `/`) cannot alter canonical message state or mint a successful successor.
-42. `done` leaves completed message content as inert escaped plain text even when the stored value resembles a hostname or URL; Stateboard does not automatically emit a link, redirect, fetch, or other navigation primitive for that content.
-43. Ordered composition events contain enough structured transition information to reconstruct the exact exposed choices that produced a partial or completed message without storing a full message snapshot in each event.
+1. A fresh stateful composition entrance creates one activity and associates the root capability with it.
+2. Successor choose/read/continue capabilities remain on the same activity.
+3. Ordinary public browsing creates no activity.
+4. Refreshing a capability-bearing view neither consumes authority nor adds an activity transition.
+5. Accepted composition transitions are durably attributable to the activity without storing raw capability values or duplicate message snapshots.
+6. The continuation view contains a complete native Stateboard/index navigation action in addition to the existing continuation choices.
+7. Following that stateful navigation action atomically consumes the current capability, records exactly one activity transition, issues exactly one successor for the same activity, and reaches a refresh-safe activity-aware destination.
+8. A sibling/replayed navigation action cannot produce a second successful successor.
+9. Activity-aware navigation can reach the message index and applicable message/thread/author views without manual URL construction.
+10. Stateful navigation does not establish or change author continuity merely by browsing.
+11. Preserve/re-entry resumes the same activity rather than creating a new one.
+12. Stateful browsing after re-entry can rotate capability authority without losing the activity or legitimate author-bound options.
+13. Return-new and return-reply still create correct author membership; return-reply still composes author and thread relations independently.
+14. Spent capability recognition material is not required to reconstruct successful activity history. Tests should demonstrate the implemented retirement/tombstone behavior.
+15. Replay/concurrency protections still hold after capability recognition retirement.
+16. Existing public message/thread/author views remain anonymously accessible and contain no bearer material.
+17. Existing keyboard alphabet validation remains intact, while no new URL-punctuation-specific security/telemetry mechanism is introduced.
+18. Completed message content remains inert escaped text.
+19. Migrations apply cleanly to a fresh local/test D1 database and `PRAGMA foreign_key_check` is clean.
+20. Migration from the pre-activity schema is covered or otherwise reproducibly validated without fabricating historical activity continuity.
+21. Existing tests continue to pass except where intentionally updated for the new documented semantics.
 
-## Required tests and checks
+## Required checks
 
-Create focused Vitest coverage for the protocol rather than only broad smoke tests.
+Run:
+- `npm ci` when dependency provisioning is needed;
+- `npm test`;
+- `npm run typecheck`;
+- `git diff --check`;
+- a fresh local/test D1 migration smoke check;
+- `PRAGMA foreign_key_check`;
+- a deployment dry-run if supported without production mutation.
 
-Before completion, run:
+If practical, also exercise a local end-to-end path:
+`enter -> compose -> done -> read -> Stateboard/index -> messages -> relevant detail -> preserve/return or author-bound action`.
 
-- `npm test`
-- `npm run typecheck`
-- `git diff --check`
-
-Also perform a migration smoke check against a fresh local/test SQLite/D1 database and verify `PRAGMA foreign_key_check`.
-
-If the Worker toolchain supports a dry-run deployment without requiring fabricated production resources, run it and report the result.
+Do not claim remote Cloudflare D1 validation unless it actually ran against remote D1.
 
 ## Documentation changes
 
-Update `README.md` so it explains:
+Update `README.md` for the user-visible stateful navigation/activity behavior and any changed local migration commands.
 
-- what Stateboard is;
-- the public routes;
-- the return/possibility concept at a high level without exposing credentials;
-- local setup;
-- how to run migrations/tests/dev server;
-- what Cloudflare resources the operator must create before production deployment;
-- that production resource IDs/hostname are intentionally not invented by this task.
-
-If implementation uncovers a durable protocol decision not already covered by `docs/STATEBOARD_ARCHITECTURE.md`, update that architecture document rather than burying the decision only in code or comments.
+Update `docs/STATEBOARD_ARCHITECTURE.md` only if implementation uncovers a durable decision not already captured there. Do not silently revert its activity/capability model.
 
 ## Explicit non-goals
 
-Do not implement in this slice:
-
-- removal of Agent Lab from Loom;
-- copying/migrating production Loom Agent Lab data;
-- cross-repository synchronization;
-- a Loom-to-Stateboard bridge;
-- notifications/inbox state;
-- arrival/referrer/session dashboards;
-- IP or user-agent tracking;
-- semantic search or topic grouping;
+Do not implement:
+- notifications/inbox;
+- analytics dashboards;
+- IP/user-agent/referrer tracking;
+- Loom integration;
 - arbitrary text input;
-- alternative keyboard/search-field ingress;
-- keyboard alphabet expansion beyond lowercase letters and space;
-- URL-critical punctuation such as `/`;
-- automatic or explicit linkification/navigation of constructed message values;
+- alphabet expansion;
+- automatic linkification/navigation from composed text;
 - custom domains;
-- production Cloudflare resource creation;
+- production deployment/resource creation;
 - human accounts/authentication;
-- moderation tooling;
-- general-purpose APIs;
-- pagination beyond the first bounded message index.
+- moderation;
+- semantic search/topic grouping;
+- speculative remote D1 parser fixes unrelated to this slice.
 
 ## Completion report
 
 Report:
-
-1. files and architecture implemented;
-2. Stateboard schema and migration details;
-3. route/protocol coverage;
-4. exact test/typecheck/whitespace/migration-check results;
-5. any dry-run result;
-6. any operator steps still required for production Cloudflare setup;
-7. intentionally deferred work.
+1. schema/migrations and compatibility treatment;
+2. activity and capability lifecycle implementation;
+3. navigation/return protocol changes;
+4. tests and exact results;
+5. migration/FK/dry-run results;
+6. any validation that could not run and why;
+7. intentionally deferred work, especially the separate remote D1 migration issue.
