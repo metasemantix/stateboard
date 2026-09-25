@@ -62,4 +62,7 @@ CREATE TABLE events (
 INSERT INTO events(id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at)
 SELECT id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at FROM events_legacy;
 DROP TABLE events_legacy;
-CREATE INDEX events_activity_order ON events(activity_id, created_at, transition_index);
+-- transition_index, rather than wall-clock time, is the canonical activity
+-- order. NULL legacy activity IDs remain outside this new invariant.
+CREATE UNIQUE INDEX events_activity_order ON events(activity_id, transition_index)
+WHERE activity_id IS NOT NULL;

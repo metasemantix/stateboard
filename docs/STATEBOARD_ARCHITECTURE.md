@@ -575,11 +575,13 @@ Suggested table:
 
 `events(id, message_id, author_chain_id, capability_id, operation, choice, outcome, symbol_count, created_at)`
 
-The implementation adds a per-message `transition_index` to that shape. It is
-allocated in the same D1 batch as the transition and is unique within a
-message, so accepted choices remain reconstructable even when multiple events
-receive the same wall-clock timestamp. It is ordering metadata, not a snapshot
-of message content.
+The implementation adds `transition_index` to that shape. For activity-aware
+events it is allocated in the same D1 batch as the transition, is monotonically
+ordered and unique within the activity, and is the canonical activity order;
+`created_at` remains metadata. The legacy per-message uniqueness constraint is
+retained for pre-activity reconstruction, and pre-activity rows keep a null
+activity rather than being assigned invented continuity. This index is ordering
+metadata, not a snapshot of message content.
 
 Useful operations include:
 

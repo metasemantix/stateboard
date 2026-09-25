@@ -44,11 +44,11 @@ async function issue(db: D1Database, op: Cap["expected_operation"], message: str
   return { raw, id };
 }
 const eventStmt = (db: D1Database, operation: string, outcome: string, message: string | null, author: string | null, capability: string | null, choice: string | null, count: number | null) =>
-  db.prepare("INSERT INTO events(id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at,activity_id) SELECT ?,?,?,?,?,?,?,?,COALESCE(MAX(transition_index),-1)+1,?,(SELECT activity_id FROM capabilities WHERE id=?) FROM events WHERE message_id IS ?")
-    .bind(opaqueId("event"),message,author,capability,operation,choice,outcome,count,now(),capability,message);
+  db.prepare("INSERT INTO events(id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at,activity_id) SELECT ?,?,?,?,?,?,?,?,COALESCE((SELECT MAX(transition_index) FROM events WHERE activity_id=c.activity_id),-1)+1,?,c.activity_id FROM capabilities c WHERE c.id=?")
+    .bind(opaqueId("event"),message,author,capability,operation,choice,outcome,count,now(),capability);
 const guardedEventStmt = (db: D1Database, guardCapability: string, consumption: string, operation: string, message: string | null, author: string | null, capability: string, choice: string | null, count: number | null) =>
-  db.prepare("INSERT INTO events(id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at,activity_id) SELECT ?,?,?,?,?,?,?,?,COALESCE(MAX(transition_index),-1)+1,?,(SELECT activity_id FROM capabilities WHERE id=?) FROM events WHERE message_id IS ? HAVING EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)")
-    .bind(opaqueId("event"),message,author,capability,operation,choice,"success",count,now(),capability,message,guardCapability,consumption);
+  db.prepare("INSERT INTO events(id,message_id,author_chain_id,capability_id,operation,choice,outcome,symbol_count,transition_index,created_at,activity_id) SELECT ?,?,?,?,?,?,?,?,COALESCE((SELECT MAX(transition_index) FROM events WHERE activity_id=c.activity_id),-1)+1,?,c.activity_id FROM capabilities c WHERE c.id=? AND EXISTS(SELECT 1 FROM capabilities WHERE id=? AND consumption_id=?)")
+    .bind(opaqueId("event"),message,author,capability,operation,choice,"success",count,now(),capability,guardCapability,consumption);
 
 async function createMessage(env: Env, operation: string, target?: string) {
   const id = opaqueId("message"), raw = capabilityToken(), cid = opaqueId("capability"), activity = opaqueId("activity"), stamp = now();

@@ -261,7 +261,7 @@ describe("durable activity and stateful navigation", () => {
     expect((await get(location(moved))).status).toBe(200); expect((await get(location(moved))).status).toBe(200);
     expect([await count("capabilities"),await count("events")]).toEqual(beforeRefresh);
     expect(await count("events")).toBe(events+1);
-    expect(await env.DB.prepare("SELECT operation,target_kind,activity_id FROM events WHERE id=(SELECT id FROM events WHERE activity_id=? ORDER BY created_at DESC LIMIT 1)").bind(old!.activity_id).first()).toMatchObject({operation:"navigate",target_kind:"index",activity_id:old!.activity_id});
+    expect(await env.DB.prepare("SELECT operation,target_kind,activity_id FROM events WHERE id=(SELECT id FROM events WHERE activity_id=? ORDER BY transition_index DESC LIMIT 1)").bind(old!.activity_id).first()).toMatchObject({operation:"navigate",target_kind:"index",activity_id:old!.activity_id});
   });
 
   it("navigates index, messages and detail without creating authorship", async () => {
@@ -281,6 +281,28 @@ describe("durable activity and stateful navigation", () => {
     const moved=await get(`/activity/go?cap=${p.returnCap}&kind=messages`), successor=await capRow(location(moved).searchParams.get("cap")!);
     expect(successor!.activity_id).toBe(returned!.activity_id); expect(successor!.author_chain_id).toBe(returned!.author_chain_id);
     expect(await capRow(p.returnCap)).toBeNull();
+  });
+
+  it("keeps one canonical monotonic activity order across message and navigation events", async () => {
+    const f=await finish("ordered"), original=await env.DB.prepare("SELECT activity_id FROM events WHERE message_id=? LIMIT 1").bind(f.message).first<{activity_id:string}>();
+    const moved=await get(`/activity/go?cap=${f.continueCap}&kind=index`), navigationCap=location(moved).searchParams.get("cap")!;
+    const messages=await get(`/activity/go?cap=${navigationCap}&kind=messages`);
+    expect(messages.status).toBe(303);
+    const trail=await env.DB.prepare("SELECT message_id,operation,transition_index FROM events WHERE activity_id=? ORDER BY transition_index").bind(original!.activity_id).all<{message_id:string|null,operation:string,transition_index:number}>();
+    expect(trail.results.map(event=>event.transition_index)).toEqual(trail.results.map((_,index)=>index));
+    expect(trail.results.some(event=>event.message_id===null&&event.operation==="navigate")).toBe(true);
+    expect(new Set(trail.results.map(event=>event.transition_index)).size).toBe(trail.results.length);
+  });
+
+  it("cannot create duplicate activity positions under navigation replay", async () => {
+    const f=await finish("raceorder"), activity=(await capRow(f.continueCap))!.activity_id as string;
+    const action=`/activity/go?cap=${f.continueCap}&kind=index`;
+    const results=await Promise.all([get(action),get(action)]);
+    expect(results.map(result=>result.status).sort()).toEqual([303,404]);
+    const positions=await env.DB.prepare("SELECT transition_index,count(*) AS uses FROM events WHERE activity_id=? GROUP BY transition_index ORDER BY transition_index").bind(activity).all<{transition_index:number,uses:number}>();
+    expect(positions.results.every(position=>position.uses===1)).toBe(true);
+    const last=positions.results.at(-1)!;
+    await expect(env.DB.prepare("INSERT INTO events(id,operation,outcome,transition_index,created_at,activity_id) VALUES('sbe_duplicate_activity_order','fixture','success',?,?,?)").bind(last.transition_index, new Date().toISOString(), activity).run()).rejects.toThrow();
   });
 });
 
