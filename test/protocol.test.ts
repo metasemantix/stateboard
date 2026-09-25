@@ -1,9 +1,8 @@
-import { env, SELF } from "cloudflare:test";
+import { applyD1Migrations, env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import migration from "../migrations/0001_initial.sql?raw";
 import { hashCapability } from "../src/index";
 
-beforeAll(async () => { await env.DB.exec(migration); });
+beforeAll(async () => { await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 
 const origin = "https://stateboard.test";
 const get = (path: string | URL) => SELF.fetch(new URL(path, origin), { redirect: "manual" });
