@@ -77,7 +77,7 @@ BEGIN SELECT RAISE(ABORT, 'completed messages are immutable'); END;
 CREATE TRIGGER thread_parent_same_thread_insert
 BEFORE INSERT ON thread_members WHEN NEW.parent_message_id IS NOT NULL
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT (CASE WHEN NOT EXISTS (
     SELECT 1 FROM thread_members p WHERE p.thread_id = NEW.thread_id AND p.message_id = NEW.parent_message_id
-  ) THEN RAISE(ABORT, 'parent must belong to thread') END;
+  ) THEN RAISE(ABORT, 'parent must belong to thread') END);
 END;
