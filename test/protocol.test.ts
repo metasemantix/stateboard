@@ -106,7 +106,8 @@ describe("fresh entrances and keyboard composition", () => {
     const read=await get(`/keyboard/read?cap=${readCap}&id=${row!.message_id}`); expect(read.status).toBe(303);
     expect((await get(`/keyboard/read?cap=${readCap}&id=${row!.message_id}`)).status).toBe(404);
     const html=await (await get(location(read))).text();
-    expect(html).toContain('<p id="value">a</p>'); expect((html.match(/<a /g)||[])).toHaveLength(2);
+    expect(html).toContain('<p id="value">a</p>'); expect((html.match(/<a /g)||[])).toHaveLength(3);
+    expect(html).toContain("Stateboard / possibilities");
     expect(html).toContain("next message"); expect(html).toContain("preserve author continuity");
   });
 });
@@ -175,7 +176,8 @@ describe("author continuation and return", () => {
     expect(results.map(x=>x.status).sort()).toEqual([303,404]);
     expect(await count("author_chains")).toBe(before.chains+1);
     expect(await count("messages")).toBe(before.messages+(results[0].status===303?1:0));
-    expect((await scalar("SELECT count(*) n FROM capabilities WHERE predecessor_capability_id=(SELECT id FROM capabilities WHERE token_hash=?)",await hashCapability(f.continueCap))).n).toBe(1);
+    const source=await env.DB.prepare("SELECT id FROM capabilities WHERE message_id=? AND expected_operation='continue'").bind(f.message).first<{id:string}>();
+    expect((await scalar("SELECT count(*) n FROM capabilities WHERE predecessor_capability_id=?",source!.id)).n).toBe(1);
     expect(await count("events")).toBe(before.events+1);
     expect((await scalar("SELECT count(*) n FROM author_chains a WHERE NOT EXISTS(SELECT 1 FROM author_members m WHERE m.author_chain_id=a.id)")).n).toBe(0);
   });
@@ -198,7 +200,7 @@ describe("author continuation and return", () => {
     const p=await preserve("newauthor"), row=await capRow(p.returnCap), before=[await count("messages"),await count("author_members")];
     const stable=await get(`/return/new?cap=${p.returnCap}`); expect(stable.status).toBe(303); expect([await count("messages"),await count("author_members")]).toEqual(before);
     const made=await get(location(stable)); expect(made.status).toBe(303); expect([await count("messages"),await count("author_members")]).toEqual([before[0]+1,before[1]+1]);
-    expect((await capRow(p.returnCap))!.consumed_at).not.toBeNull();
+    expect(await capRow(p.returnCap)).toBeNull();
     const successor=await capRow(location(made).searchParams.get("cap")!); expect(successor).toMatchObject({author_chain_id:row!.author_chain_id,predecessor_capability_id:row!.id});
     expect((await get(location(stable))).status).toBe(404);
   });
@@ -223,12 +225,84 @@ describe("author continuation and return", () => {
   });
 
   it("racing sibling return actions create exactly one complete transition", async () => {
-    const target=await finish("race target"), p=await preserve("racer"), before={m:await count("messages"),a:await count("author_members"),t:await count("thread_members")};
+    const target=await finish("race target"), p=await preserve("racer"), returnRow=await capRow(p.returnCap), before={m:await count("messages"),a:await count("author_members"),t:await count("thread_members")};
     const n=await get(`/return/new?cap=${p.returnCap}`), r=await get(`/return/reply?cap=${p.returnCap}&to=${target.message}`);
     const results=await Promise.all([get(location(n)),get(location(r))]); expect(results.map(x=>x.status).sort()).toEqual([303,404]);
     expect(await count("messages")).toBe(before.m+1); expect(await count("author_members")).toBe(before.a+1);
     expect(await count("thread_members")).toBe(before.t+(results[1].status===303?2:0));
-    expect((await scalar("SELECT count(*) n FROM capabilities WHERE predecessor_capability_id=(SELECT id FROM capabilities WHERE token_hash=?)",await hashCapability(p.returnCap))).n).toBe(1);
+    expect((await scalar("SELECT count(*) n FROM capabilities WHERE predecessor_capability_id=?",returnRow!.id)).n).toBe(1);
+  });
+});
+
+describe("durable activity and stateful navigation", () => {
+  it("creates one activity at entrance and propagates it through composition", async () => {
+    const before=await count("activities"), s=await start(), root=await capRow(s.cap);
+    expect(await count("activities")).toBe(before+1); expect(root!.activity_id).toMatch(/^sbv_/);
+    const next=await choose(s.cap,"a"), successor=await capRow(next.cap);
+    expect(successor!.activity_id).toBe(root!.activity_id);
+    expect((await env.DB.prepare("SELECT activity_id,operation,choice FROM events WHERE message_id=? ORDER BY transition_index").bind(root!.message_id).all()).results).toEqual(expect.arrayContaining([expect.objectContaining({activity_id:root!.activity_id,operation:"choose",choice:"a"})]));
+  });
+
+  it("does not create activity for public browsing", async () => {
+    const before=await count("activities");
+    for(const path of ["/","/messages","/message?id=missing","/author?id=missing","/thread?id=missing"]) await get(path);
+    expect(await count("activities")).toBe(before);
+  });
+
+  it("rotates navigation once, retires recognition, and keeps destination refresh-safe", async () => {
+    const f=await finish("navigate"), old=await capRow(f.continueCap), events=await count("events");
+    const action=`/activity/go?cap=${encodeURIComponent(f.continueCap)}&kind=index`;
+    const moved=await get(action); expect(moved.status).toBe(303);
+    const nextRaw=location(moved).searchParams.get("cap")!, next=await capRow(nextRaw);
+    expect(next).toMatchObject({activity_id:old!.activity_id,expected_operation:"navigate",target_kind:"index"});
+    expect(await capRow(f.continueCap)).toBeNull();
+    expect((await get(action)).status).toBe(404);
+    const beforeRefresh=[await count("capabilities"),await count("events")];
+    expect((await get(location(moved))).status).toBe(200); expect((await get(location(moved))).status).toBe(200);
+    expect([await count("capabilities"),await count("events")]).toEqual(beforeRefresh);
+    expect(await count("events")).toBe(events+1);
+    expect(await env.DB.prepare("SELECT operation,target_kind,activity_id FROM events WHERE id=(SELECT id FROM events WHERE activity_id=? ORDER BY transition_index DESC LIMIT 1)").bind(old!.activity_id).first()).toMatchObject({operation:"navigate",target_kind:"index",activity_id:old!.activity_id});
+  });
+
+  it("navigates index, messages and detail without creating authorship", async () => {
+    const f=await finish("detail"), old=await capRow(f.continueCap);
+    let r=await get(`/activity/go?cap=${f.continueCap}&kind=index`), raw=location(r).searchParams.get("cap")!;
+    r=await get(`/activity/go?cap=${raw}&kind=messages`); raw=location(r).searchParams.get("cap")!;
+    const pageHtml=await (await get(location(r))).text(); expect(pageHtml).toContain("detail");
+    r=await get(`/activity/go?cap=${raw}&kind=message&id=${f.message}`); expect(r.status).toBe(303);
+    expect(await (await get(location(r))).text()).toContain("detail");
+    expect((await scalar("SELECT count(*) n FROM author_members WHERE message_id=?",f.message)).n).toBe(0);
+    expect((await capRow(location(r).searchParams.get("cap")!))!.activity_id).toBe(old!.activity_id);
+  });
+
+  it("preserve and re-entry retain activity across rotating browse authority", async () => {
+    const p=await preserve("resume"), returned=await capRow(p.returnCap), view=await get(`/return?cap=${p.returnCap}`);
+    expect(view.status).toBe(200);
+    const moved=await get(`/activity/go?cap=${p.returnCap}&kind=messages`), successor=await capRow(location(moved).searchParams.get("cap")!);
+    expect(successor!.activity_id).toBe(returned!.activity_id); expect(successor!.author_chain_id).toBe(returned!.author_chain_id);
+    expect(await capRow(p.returnCap)).toBeNull();
+  });
+
+  it("keeps one canonical monotonic activity order across message and navigation events", async () => {
+    const f=await finish("ordered"), original=await env.DB.prepare("SELECT activity_id FROM events WHERE message_id=? LIMIT 1").bind(f.message).first<{activity_id:string}>();
+    const moved=await get(`/activity/go?cap=${f.continueCap}&kind=index`), navigationCap=location(moved).searchParams.get("cap")!;
+    const messages=await get(`/activity/go?cap=${navigationCap}&kind=messages`);
+    expect(messages.status).toBe(303);
+    const trail=await env.DB.prepare("SELECT message_id,operation,transition_index FROM events WHERE activity_id=? ORDER BY transition_index").bind(original!.activity_id).all<{message_id:string|null,operation:string,transition_index:number}>();
+    expect(trail.results.map(event=>event.transition_index)).toEqual(trail.results.map((_,index)=>index));
+    expect(trail.results.some(event=>event.message_id===null&&event.operation==="navigate")).toBe(true);
+    expect(new Set(trail.results.map(event=>event.transition_index)).size).toBe(trail.results.length);
+  });
+
+  it("cannot create duplicate activity positions under navigation replay", async () => {
+    const f=await finish("raceorder"), activity=(await capRow(f.continueCap))!.activity_id as string;
+    const action=`/activity/go?cap=${f.continueCap}&kind=index`;
+    const results=await Promise.all([get(action),get(action)]);
+    expect(results.map(result=>result.status).sort()).toEqual([303,404]);
+    const positions=await env.DB.prepare("SELECT transition_index,count(*) AS uses FROM events WHERE activity_id=? GROUP BY transition_index ORDER BY transition_index").bind(activity).all<{transition_index:number,uses:number}>();
+    expect(positions.results.every(position=>position.uses===1)).toBe(true);
+    const last=positions.results.at(-1)!;
+    await expect(env.DB.prepare("INSERT INTO events(id,operation,outcome,transition_index,created_at,activity_id) VALUES('sbe_duplicate_activity_order','fixture','success',?,?,?)").bind(last.transition_index, new Date().toISOString(), activity).run()).rejects.toThrow();
   });
 });
 
