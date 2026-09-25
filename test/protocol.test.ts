@@ -1,9 +1,10 @@
-import { env, SELF } from "cloudflare:test";
+import { applyD1Migrations, env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import migration from "../migrations/0001_initial.sql?raw";
 import { hashCapability } from "../src/index";
 
-beforeAll(async () => { await env.DB.exec(migration); });
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+});
 
 const origin = "https://stateboard.test";
 const get = (path: string | URL) => SELF.fetch(new URL(path, origin), { redirect: "manual" });
@@ -270,6 +271,7 @@ describe("capability rejection, telemetry, discovery, and schema", () => {
     await expect(env.DB.prepare("INSERT INTO thread_members VALUES('sbt_schema_one','sbm_schema_root',2,'sbm_schema_root',?)").bind(stamp).run()).rejects.toThrow();
     await env.DB.batch([env.DB.prepare("INSERT INTO author_chains VALUES('sba_schema_one',?)").bind(stamp),env.DB.prepare("INSERT INTO author_chains VALUES('sba_schema_two',?)").bind(stamp),env.DB.prepare("INSERT INTO author_members VALUES('sba_schema_one','sbm_schema_child',1,?)").bind(stamp)]);
     await expect(env.DB.prepare("INSERT INTO author_members VALUES('sba_schema_two','sbm_schema_child',1,?)").bind(stamp).run()).rejects.toThrow();
+    await expect(env.DB.prepare("INSERT INTO author_members VALUES('sba_schema_one','sbm_missing',2,?)").bind(stamp).run()).rejects.toThrow();
     expect((await env.DB.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     const tables=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all<{name:string}>()).results.map(x=>x.name);
     expect(tables).toEqual(expect.arrayContaining(["messages","capabilities","author_chains","author_members","threads","thread_members","events"]));

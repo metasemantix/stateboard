@@ -1,5 +1,3 @@
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE messages (
   id TEXT PRIMARY KEY CHECK (id GLOB 'sbm_*'),
   value TEXT NOT NULL DEFAULT '',
