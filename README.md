@@ -13,11 +13,18 @@ link keyboard, without an account.
 - `/keyboard/reply?to=…` — stable anonymous reply action
 - `/llms.txt`, `/robots.txt`, `/sitemap.xml` — discovery
 
-After completing and reading a message, its holder may preserve author
-continuity. The resulting private return URL opens a non-consuming possibility
-page: it can browse public state or spend the single-use capability on a new
-author-bound message or reply. This is observed continuity, not authentication
-or verified identity. Return URLs are credentials and must not be published.
+Every stateful entrance starts a durable **activity**: an interaction trail that
+is separate from authorship and threads. After a completed message is read, the
+continuation page offers a native route back to a capability-aware Stateboard
+index. Following stateful navigation links rotates the single-use capability;
+refreshing the resulting page does not. Ordinary public browsing creates no
+activity.
+
+A holder may also preserve author continuity. The resulting private return URL
+resumes the same activity at a non-consuming possibility page, from which the
+holder can browse statefully or start an author-bound message or reply. This is
+observed continuity, not authentication or verified identity. Capability and
+return URLs are credentials and must not be published.
 
 ## Local development
 
@@ -38,9 +45,12 @@ npm run typecheck
 npm run deploy:check
 ```
 
-The migration creates the Stateboard-native `messages`, `capabilities`,
-`author_chains`, `author_members`, `threads`, `thread_members`, and `events`
-tables. Raw capability values are never stored.
+The migrations create the Stateboard-native `messages`, `capabilities`,
+`activities`, `author_chains`, `author_members`, `threads`, `thread_members`,
+and activity-aware `events` tables. Migration `0002` leaves pre-activity rows
+unassociated rather than fabricating historical continuity. Raw capability
+values are never stored, and hashes are cleared from successfully consumed
+capability tombstones after their transition is recorded.
 
 ## Production setup
 
