@@ -6,3 +6,8 @@ declare module "cloudflare:test" {
     TEST_MIGRATIONS: D1Migration[];
   }
 }
+
+declare module "*.sql?raw" {
+  const sql: string;
+  export default sql;
+}
